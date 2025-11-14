@@ -11,3 +11,6 @@ dependencies = [
     "pyserial>=3.5",
     "requests>=2.32.5",
 ]
+required-environments = [
+    "sys_platform == 'darwin' and platform_machine == 'x86_64' and platform_machine == 'arm64'"
+]
