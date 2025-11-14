@@ -8,7 +8,7 @@ import sys
 import os
 import shutil
 import requests
-#import subprocess
+import subprocess
 import platform
 import tempfile
 import json
@@ -54,7 +54,7 @@ default_settings = {
     "theme": "dark",
     "accent": "dark-blue",
     "tooltips": True,
-    "favorites": ["Custom (User provided .uf2)"],
+    "favorites": ["Custom (User provided .uf2 / .hex)"],
     "seen_favorite_hint": False
 }
 
@@ -86,16 +86,28 @@ def fetch_latest_firmware_assets():
         response = requests.get(api_url, timeout=10)
         response.raise_for_status()
         data = response.json()
+
+        if isinstance(data, list) and len(data) > 0:
+            data = data[0]
+
         assets = data.get("assets", [])
         fw_dict = {}
+
         for asset in assets:
-            name = asset["name"]
-            if name.endswith(".uf2"):
-                fw_dict[name] = asset["browser_download_url"]
+            name = asset.get("name", "")
+            url = asset.get("browser_download_url", "")
+            if name.endswith((".uf2", ".hex")):
+                fw_dict[name] = url
+
+        if not fw_dict:
+            append_text("No UF2 or HEX found in latest release. check internet and if still issue, post a issue on github, https://icmt.cc\n", "error")
+
         return fw_dict
+
     except Exception as e:
         append_text(f"[Error fetching firmware list] {e}\n", "error")
         return {}
+
 
 # Start base window, size & name
 app = ctk.CTk()
@@ -320,11 +332,12 @@ def append_text(text, color=None):
 
 
 
+
 # The thing that asks for the custom .U2F
 def on_tracker_change(choice):
     global custom_fw_path
     if choice == "Custom…":
-        path = filedialog.askopenfilename(title="Select firmware (.uf2)", filetypes=[("UF2 files", "*.uf2")])
+        path = filedialog.askopenfilename(title="Select firmware (.uf2 or .hex)", filetypes=[("Firmware files", "*.uf2 *.hex"), ("UF2 files", "*.uf2"), ("HEX files", "*.hex")])
         if path:
             custom_fw_path = path
             send_button.configure(text=f"Flash: {os.path.basename(path)}")
@@ -360,7 +373,7 @@ progress_bar = ctk.CTkProgressBar(app, width=1000)
 progress_bar.set(0)
 progress_bar.pack_forget()
 
-firmware_urls = {"Custom (User provided .uf2)": None}
+firmware_urls = {"Custom (User provided .uf2 / .hex)": None}
 
 # Fill the dropdown menu with latest releases
 selected_firmware = tk.StringVar(value="Select Firmware")
@@ -458,11 +471,23 @@ def open_firmware_popup():
     search_var.trace_add("write", on_paste_url)
 
     def _on_mousewheel(event):
-        scroll_frame._parent_canvas.yview_scroll(-1 * (event.delta // 120), "units")
+        canvas = getattr(scroll_frame, "_parent_canvas", None)
+        if canvas and str(canvas) in canvas.tk.call("winfo", "children", "."):
+            canvas.yview_scroll(-1 * (event.delta // 120), "units")
+
+    def _on_button4(_):
+        canvas = getattr(scroll_frame, "_parent_canvas", None)
+        if canvas and str(canvas) in canvas.tk.call("winfo", "children", "."):
+            canvas.yview_scroll(-1, "units")
+
+    def _on_button5(_):
+        canvas = getattr(scroll_frame, "_parent_canvas", None)
+        if canvas and str(canvas) in canvas.tk.call("winfo", "children", "."):
+            canvas.yview_scroll(1, "units")
 
     scroll_frame.bind_all("<MouseWheel>", _on_mousewheel)
-    scroll_frame.bind_all("<Button-4>", lambda e: scroll_frame._parent_canvas.yview_scroll(-1, "units"))
-    scroll_frame.bind_all("<Button-5>", lambda e: scroll_frame._parent_canvas.yview_scroll(1, "units"))
+    scroll_frame.bind_all("<Button-4>", _on_button4)
+    scroll_frame.bind_all("<Button-5>", _on_button5)
 
     update_list()
     popup.wait_visibility()
@@ -480,9 +505,9 @@ def populate_firmware_menu():
     global firmware_urls
     auto_fw = fetch_latest_firmware_assets()
     if auto_fw:
-        firmware_urls = {**auto_fw, "Custom (User provided .uf2)": None}
+        firmware_urls = {**auto_fw, "Custom (User provided .uf2 / .hex)": None}
     else:
-        firmware_urls = {"Custom (User provided .uf2)": None}
+        firmware_urls = {"Custom (User provided .uf2 / .hex)": None}
 
 
 app.after(100, populate_firmware_menu)
@@ -497,6 +522,70 @@ def animate_progress(target, step=0.02, interval=50):
         if target == 1.0:
             app.after(2000, lambda: progress_bar.pack_forget())
 
+def get_nrfutil_path():
+    if getattr(sys, 'frozen', False):
+        base_path = sys._MEIPASS if hasattr(sys, '_MEIPASS') else os.path.dirname(os.path.abspath(sys.executable))
+        nrfutil_path = os.path.join(base_path, 'nrfutil')
+        if sys.platform == "win32" and not nrfutil_path.endswith('.exe'):
+            nrfutil_path += '.exe'
+        return nrfutil_path
+    else:
+        return "nrfutil"
+
+# HEX flashing usin command thingy, idk if works
+def flash_hex_firmware(file_path):
+    global ser, connected
+    if not ser or not ser.is_open:
+        append_text("Device not connected.\n", "error")
+        return
+    
+    append_text("Entering bootloader...\n")
+    send_command("dfu")
+    time.sleep(2)
+
+    port = ser.port
+    append_text(f"Starting Flash on port: {port}...\n")
+    ser.close()
+    ser = None
+    connected = False
+    nrfutil_cmd = get_nrfutil_path()
+
+    try:
+        dfu_package = os.path.splitext(file_path)[0] + "_dfu_package.zip"
+
+        append_text("Generating DFU package...\n")
+        subprocess.run([
+            nrfutil_cmd, "pkg", "generate",
+            "--hw-version", "52",
+            "--application-version", "1",
+            "--sd-req", "0x00",
+            "--application", file_path,
+            dfu_package
+        ], check=True, shell=False)
+
+        append_text("Flashing DFU package via serial...\n")
+        subprocess.run([
+            nrfutil_cmd, "dfu", "serial",
+            "--package", dfu_package,
+            "--port", port,
+            "--baud-rate", "115200"
+        ], check=True, shell=False)
+
+        append_text("YAY! FW Flashed!!!\n", "success")
+        progress_bar.set(1.0)
+
+    except FileNotFoundError:
+        append_text("Error 420: run 'pip install nrfutil'.\n", "error")
+    except subprocess.CalledProcessError as e:
+        append_text(f"Error code: {e}\n", "error")
+    finally:
+        try:
+            if os.path.exists(dfu_package):
+                os.remove(dfu_package)
+        except Exception:
+            pass
+
+
 
 # Download the firmware once user selected and pressed the Firmware button,
 # and also the actual logic for flashing (Resets, puts into DFU, waits for drive to appear, moves the .U2F to the drive)
@@ -508,13 +597,19 @@ def download_firmware():
         append_text("Please select a firmware option.\n", "error")
         return
 
-    if selection == "Custom (User provided .uf2)":
-        file_path = filedialog.askopenfilename(filetypes=[("UF2 files", "*.uf2")])
+    
+
+    if selection == "Custom (User provided .uf2 / .hex)":
+        file_path = filedialog.askopenfilename(filetypes=[("Firmware files", "*.uf2 *.hex"), ("UF2 files", "*.uf2"), ("HEX files", "*.hex")])
         if not file_path:
             append_text("No custom firmware selected.\n")
             return
         append_text(f"Selected custom firmware: {file_path}\n")
         local_path = file_path
+        if local_path.endswith(".hex"):
+            append_text("Starting flashing... [HEX]\n", "success")
+            flash_hex_firmware(local_path)
+            return
     else:
         firmware_url = firmware_urls.get(selection)
         if not firmware_url:
@@ -531,6 +626,10 @@ def download_firmware():
                 shutil.copyfileobj(response.raw, f)
 
             append_text(f"Firmware downloaded to: {local_path}\n", "success")
+            if local_path.endswith(".hex"):
+                append_text("yoo HEX file! Loading...\n", "success")
+                flash_hex_firmware(local_path)
+                return
 
         except Exception as e:
             append_text(f"[Error] Firmware download failed: {e}\n", "error")

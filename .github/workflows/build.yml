@@ -1,0 +1,57 @@
+name: build
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          [
+            ubuntu-22.04,
+            windows-latest,
+            macos-latest,
+            ubuntu-22.04-arm,
+            windows-11-arm,
+          ]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version-file: ".python-version"
+
+      - name: Install the project
+        run: uv sync --locked --all-extras --dev
+
+      - if: matrix.os == 'windows-latest'
+        name: install upx on windows
+        run: winget install upx --disable-interactivity  --accept-package-agreements --accept-source-agreements
+      
+      - if: startsWith(matrix.os, 'ubuntu')
+        name: install upx on linux
+        run: sudo apt-get install upx -y
+      
+      - name: Build the project
+        run: uv run pyinstaller SmolSlimeConfigurator.spec
+      
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v5
+        with:
+          name: SmolSlimeConfigurator-${{ matrix.os }}
+          path: dist/
+            - ${{ (matrix.os == 'windows-latest' || matrix.os == 'windows-11-arm') && 'dist/SmolSlimeConfigurator.exe' }}
+            - ${{ matrix.os == 'macos-latest' && 'dist/SmolSlimeConfigurator' }}
+            - ${{ (matrix.os == 'ubuntu-22.04' || matrix.os == 'ubuntu-22.04-arm') && 'dist/SmolSlimeConfigurator' }}
